@@ -1,0 +1,476 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+<title>PDF Flipbook</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Playfair+Display:ital@0;1&family=DM+Mono:wght@300&display=swap');
+
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --ink:   #181310;
+    --paper: #f8f2e9;
+    --gold:  #c9973a;
+    --spine: #7a5c38;
+  }
+
+  html, body {
+    height: 100%; width: 100%;
+    background: var(--ink);
+    overflow: hidden;
+  }
+
+  /* subtle grain */
+  body::after {
+    content: '';
+    position: fixed; inset: 0; z-index: 9999; pointer-events: none;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='200' height='200'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='200' height='200' filter='url(%23n)' opacity='0.04'/%3E%3C/svg%3E");
+  }
+
+  #app {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    height: 100dvh;
+    padding: 14px 10px 10px;
+  }
+
+  .header {
+    width: 100%;
+    max-width: 520px;
+    display: flex;
+    justify-content: center;
+    padding-bottom: 10px;
+    flex-shrink: 0;
+  }
+
+  .doc-title {
+    font-family: 'Playfair Display', serif;
+    font-style: italic;
+    font-size: clamp(0.85rem, 3.5vw, 1.05rem);
+    color: rgba(248,242,233,0.6);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 90%;
+  }
+
+  /* Stage — perspective container */
+  .stage {
+    flex: 1;
+    width: 100%;
+    max-width: 520px;
+    min-height: 0;
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  /* Drop shadow beneath book */
+  .stage::after {
+    content: '';
+    position: absolute;
+    bottom: -4px; left: 8%; right: 8%;
+    height: 24px;
+    background: radial-gradient(ellipse at center, rgba(0,0,0,0.7) 0%, transparent 70%);
+    filter: blur(8px);
+    pointer-events: none;
+  }
+
+  /* The single canvas that does all the drawing */
+  #flip-canvas {
+    display: block;
+    border-radius: 1px;
+    box-shadow:
+      0 2px 8px rgba(0,0,0,0.4),
+      0 8px 32px rgba(0,0,0,0.5);
+    /* canvas sized by JS */
+  }
+
+  /* Loader overlay */
+  #loader {
+    position: absolute; inset: 0;
+    display: flex; align-items: center; justify-content: center;
+    pointer-events: none;
+  }
+  .ring {
+    width: 34px; height: 34px;
+    border: 2px solid rgba(248,242,233,0.1);
+    border-top-color: var(--gold);
+    border-radius: 50%;
+    animation: spin 0.75s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* Controls */
+  .controls {
+    width: 100%;
+    max-width: 520px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px 0 2px;
+    flex-shrink: 0;
+  }
+
+  .btn {
+    background: none;
+    border: 1px solid rgba(122,92,56,0.4);
+    color: rgba(248,242,233,0.65);
+    font-family: 'DM Mono', monospace;
+    font-size: 0.6rem;
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+    padding: 9px 22px;
+    border-radius: 2px;
+    cursor: pointer;
+    transition: border-color 0.15s, color 0.15s, background 0.15s;
+    min-width: 88px;
+    user-select: none;
+    -webkit-tap-highlight-color: transparent;
+    touch-action: manipulation;
+  }
+  .btn:not(:disabled):active {
+    background: rgba(201,151,58,0.1);
+    border-color: var(--gold);
+    color: var(--gold);
+  }
+  .btn:disabled { opacity: 0.18; cursor: default; }
+
+  .page-num {
+    font-family: 'DM Mono', monospace;
+    font-size: 0.58rem;
+    letter-spacing: 0.2em;
+    color: rgba(122,92,56,0.75);
+  }
+</style>
+</head>
+<body>
+<div id="app">
+  <div class="header">
+    <span class="doc-title" id="doc-title">Loading…</span>
+  </div>
+
+  <div class="stage" id="stage">
+    <canvas id="flip-canvas"></canvas>
+    <div id="loader"><div class="ring"></div></div>
+  </div>
+
+  <div class="controls">
+    <button class="btn" id="btn-prev">← Prev</button>
+    <span class="page-num" id="page-num">— / —</span>
+    <button class="btn" id="btn-next">Next →</button>
+  </div>
+</div>
+
+<script>
+// ── CONFIG ────────────────────────────────────────────────────────────────────
+const PDF_URL  = 'https://github.com/malokuva-debug/tegjyshjamenu/blob/1f4c79d23c39e308996b6d8f41a2120b08ba3964/tegjyshja.pdf';
+const PDF_NAME = 'Te Gjyshja Menu';
+// ─────────────────────────────────────────────────────────────────────────────
+
+pdfjsLib.GlobalWorkerOptions.workerSrc =
+  'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+
+const flipCanvas = document.getElementById('flip-canvas');
+const flipCtx    = flipCanvas.getContext('2d');
+const stage      = document.getElementById('stage');
+const loader     = document.getElementById('loader');
+const btnPrev    = document.getElementById('btn-prev');
+const btnNext    = document.getElementById('btn-next');
+const pageNumEl  = document.getElementById('page-num');
+const docTitleEl = document.getElementById('doc-title');
+
+docTitleEl.textContent = PDF_NAME;
+
+let pdfDoc    = null;
+let current   = 1;
+let total     = 0;
+let flipping  = false;
+let animId    = null;
+
+// Two offscreen canvases holding rendered PDF pages
+const offA = document.createElement('canvas');
+const offB = document.createElement('canvas');
+const ctxA = offA.getContext('2d');
+const ctxB = offB.getContext('2d');
+
+let frontOff = offA;  // currently visible page
+let backOff  = offB;  // page being prepared
+
+const DPR = window.devicePixelRatio || 1;
+
+// ── Fit & render a PDF page into an offscreen canvas ─────────────────────────
+async function renderPageTo(pageNum, offCanvas) {
+  const page  = await pdfDoc.getPage(pageNum);
+  const stage = document.getElementById('stage');
+  const maxW  = stage.clientWidth;
+  const maxH  = stage.clientHeight;
+
+  const vp0   = page.getViewport({ scale: 1 });
+  const scale = Math.min(maxW / vp0.width, maxH / vp0.height) * DPR;
+  const vp    = page.getViewport({ scale });
+
+  offCanvas.width  = vp.width;
+  offCanvas.height = vp.height;
+
+  const ctx = offCanvas.getContext('2d');
+  ctx.fillStyle = '#f8f2e9';
+  ctx.fillRect(0, 0, offCanvas.width, offCanvas.height);
+  await page.render({ canvasContext: ctx, viewport: vp }).promise;
+}
+
+// ── Resize the display canvas to match the offscreen page ────────────────────
+function sizeDisplayCanvas(off) {
+  const dispW = off.width  / DPR;
+  const dispH = off.height / DPR;
+  flipCanvas.width        = off.width;
+  flipCanvas.height       = off.height;
+  flipCanvas.style.width  = dispW + 'px';
+  flipCanvas.style.height = dispH + 'px';
+}
+
+// ── Draw flat (no animation) ──────────────────────────────────────────────────
+function drawFlat(off) {
+  sizeDisplayCanvas(off);
+  flipCtx.clearRect(0, 0, flipCanvas.width, flipCanvas.height);
+  flipCtx.drawImage(off, 0, 0);
+}
+
+// ── Turn.js style composite draw ─────────────────────────────────────────────
+// progress: 0 = front fully visible, 1 = back fully visible
+// dir: 'next' = fold left (right edge folds), 'prev' = fold right (left edge folds)
+function drawTurn(frontOff, backOff, progress, dir) {
+  const W = flipCanvas.width;
+  const H = flipCanvas.height;
+
+  flipCtx.clearRect(0, 0, W, H);
+
+  // Ease progress for a snappier feel
+  const t = easeInOut(progress);
+
+  if (dir === 'next') {
+    // Fold line moves from right (t=0) to left (t=1)
+    const foldX = W * (1 - t);
+
+    // 1. Draw incoming (back) page fully underneath
+    flipCtx.drawImage(backOff, 0, 0);
+
+    // 2. Shadow cast on the incoming page (left of fold line)
+    if (foldX > 0) {
+      const shadowW = Math.min(foldX, W * 0.35);
+      const grad = flipCtx.createLinearGradient(foldX - shadowW, 0, foldX, 0);
+      grad.addColorStop(0, 'rgba(0,0,0,0)');
+      grad.addColorStop(1, 'rgba(0,0,0,0.28)');
+      flipCtx.fillStyle = grad;
+      flipCtx.fillRect(0, 0, foldX, H);
+    }
+
+    // 3. Draw the un-folded left portion of the front page
+    if (foldX > 0) {
+      flipCtx.save();
+      flipCtx.beginPath();
+      flipCtx.rect(0, 0, foldX, H);
+      flipCtx.clip();
+      flipCtx.drawImage(frontOff, 0, 0);
+      flipCtx.restore();
+    }
+
+    // 4. Draw the folded-over flap (mirror of the front page, right of foldX)
+    // The flap is the right portion of front, reflected around foldX, compressed by cos(angle)
+    const flipProgress = t; // 0→1
+    const flapMaxW = W - foldX; // how much is "past" the fold already
+    // Width of the reflected flap decreases as it rotates past 90°… simplified: just mirror
+    if (foldX < W) {
+      const flapW = W - foldX;
+      flipCtx.save();
+      flipCtx.beginPath();
+      flipCtx.rect(foldX, 0, flapW, H);
+      flipCtx.clip();
+
+      // Reflect: draw front image mirrored around foldX
+      flipCtx.save();
+      flipCtx.translate(foldX * 2, 0);
+      flipCtx.scale(-1, 1);
+      flipCtx.globalAlpha = 0.82;
+      flipCtx.drawImage(frontOff, 0, 0);
+      flipCtx.restore();
+
+      // Gradient on the flap face (dark at fold, lighter away)
+      const flapGrad = flipCtx.createLinearGradient(foldX, 0, foldX + Math.min(flapW, W * 0.18), 0);
+      flapGrad.addColorStop(0, 'rgba(0,0,0,0.35)');
+      flapGrad.addColorStop(1, 'rgba(0,0,0,0)');
+      flipCtx.fillStyle = flapGrad;
+      flipCtx.fillRect(foldX, 0, flapW, H);
+
+      flipCtx.restore();
+    }
+
+    // 5. Thin crease line at fold
+    if (foldX > 0 && foldX < W) {
+      const creaseGrad = flipCtx.createLinearGradient(foldX - 3, 0, foldX + 2, 0);
+      creaseGrad.addColorStop(0, 'rgba(0,0,0,0.12)');
+      creaseGrad.addColorStop(0.5, 'rgba(255,255,255,0.15)');
+      creaseGrad.addColorStop(1, 'rgba(0,0,0,0.1)');
+      flipCtx.fillStyle = creaseGrad;
+      flipCtx.fillRect(foldX - 3, 0, 5, H);
+    }
+
+  } else {
+    // 'prev' — fold right: fold line moves from left (t=0) to right (t=1)
+    const foldX = W * t;
+
+    // 1. Draw incoming page (back) fully underneath
+    flipCtx.drawImage(backOff, 0, 0);
+
+    // 2. Shadow on incoming page (right of fold line)
+    if (foldX < W) {
+      const shadowW = Math.min(W - foldX, W * 0.35);
+      const grad = flipCtx.createLinearGradient(foldX, 0, foldX + shadowW, 0);
+      grad.addColorStop(0, 'rgba(0,0,0,0.28)');
+      grad.addColorStop(1, 'rgba(0,0,0,0)');
+      flipCtx.fillStyle = grad;
+      flipCtx.fillRect(foldX, 0, W - foldX, H);
+    }
+
+    // 3. Un-folded right portion of front page (right of foldX)
+    if (foldX < W) {
+      flipCtx.save();
+      flipCtx.beginPath();
+      flipCtx.rect(foldX, 0, W - foldX, H);
+      flipCtx.clip();
+      flipCtx.drawImage(frontOff, 0, 0);
+      flipCtx.restore();
+    }
+
+    // 4. Folded-over flap — mirror of front, left of foldX
+    if (foldX > 0) {
+      flipCtx.save();
+      flipCtx.beginPath();
+      flipCtx.rect(0, 0, foldX, H);
+      flipCtx.clip();
+
+      flipCtx.save();
+      flipCtx.translate(foldX * 2, 0);
+      flipCtx.scale(-1, 1);
+      flipCtx.globalAlpha = 0.82;
+      flipCtx.drawImage(frontOff, 0, 0);
+      flipCtx.restore();
+
+      // Gradient on flap (dark near fold, fades left)
+      const flapGrad = flipCtx.createLinearGradient(foldX, 0, foldX - Math.min(foldX, W * 0.18), 0);
+      flapGrad.addColorStop(0, 'rgba(0,0,0,0.35)');
+      flapGrad.addColorStop(1, 'rgba(0,0,0,0)');
+      flipCtx.fillStyle = flapGrad;
+      flipCtx.fillRect(0, 0, foldX, H);
+
+      flipCtx.restore();
+    }
+
+    // 5. Crease
+    if (foldX > 0 && foldX < W) {
+      const creaseGrad = flipCtx.createLinearGradient(foldX - 2, 0, foldX + 3, 0);
+      creaseGrad.addColorStop(0, 'rgba(0,0,0,0.1)');
+      creaseGrad.addColorStop(0.5, 'rgba(255,255,255,0.15)');
+      creaseGrad.addColorStop(1, 'rgba(0,0,0,0.12)');
+      flipCtx.fillStyle = creaseGrad;
+      flipCtx.fillRect(foldX - 2, 0, 5, H);
+    }
+  }
+}
+
+function easeInOut(t) {
+  return t < 0.5 ? 2 * t * t : -1 + (4 - 2 * t) * t;
+}
+
+// ── Animate a page turn ───────────────────────────────────────────────────────
+function animateTurn(dir, onDone) {
+  const DURATION = 480;
+  const start    = performance.now();
+
+  function frame(now) {
+    const progress = Math.min((now - start) / DURATION, 1);
+    drawTurn(frontOff, backOff, progress, dir);
+    if (progress < 1) {
+      animId = requestAnimationFrame(frame);
+    } else {
+      animId = null;
+      onDone();
+    }
+  }
+  animId = requestAnimationFrame(frame);
+}
+
+// ── Flip to page ──────────────────────────────────────────────────────────────
+async function flip(dir) {
+  if (flipping) return;
+  const next = dir === 'next' ? current + 1 : current - 1;
+  if (next < 1 || next > total) return;
+  flipping = true;
+
+  // Render destination page into backOff
+  await renderPageTo(next, backOff);
+
+  // Make sure display canvas is sized to frontOff (should already be)
+  sizeDisplayCanvas(frontOff);
+
+  animateTurn(dir, () => {
+    // Swap refs
+    [frontOff, backOff] = [backOff, frontOff];
+    current  = next;
+    flipping = false;
+    drawFlat(frontOff);
+    updateUI();
+  });
+}
+
+// ── Init ──────────────────────────────────────────────────────────────────────
+async function init() {
+  pdfDoc  = await pdfjsLib.getDocument(PDF_URL).promise;
+  total   = pdfDoc.numPages;
+  current = 1;
+
+  await renderPageTo(1, frontOff);
+  drawFlat(frontOff);
+  loader.style.display = 'none';
+  updateUI();
+}
+
+function updateUI() {
+  pageNumEl.textContent = `${String(current).padStart(2,'0')} / ${String(total).padStart(2,'0')}`;
+  btnPrev.disabled      = current <= 1;
+  btnNext.disabled      = current >= total;
+}
+
+// ── Events ────────────────────────────────────────────────────────────────────
+btnNext.addEventListener('click', () => flip('next'));
+btnPrev.addEventListener('click', () => flip('prev'));
+
+document.addEventListener('keydown', e => {
+  if (e.key === 'ArrowRight' || e.key === 'ArrowDown') flip('next');
+  if (e.key === 'ArrowLeft'  || e.key === 'ArrowUp')   flip('prev');
+});
+
+let tx = 0;
+document.addEventListener('touchstart', e => { tx = e.touches[0].clientX; }, { passive: true });
+document.addEventListener('touchend',   e => {
+  const dx = e.changedTouches[0].clientX - tx;
+  if (Math.abs(dx) > 40) dx < 0 ? flip('next') : flip('prev');
+}, { passive: true });
+
+window.addEventListener('resize', () => {
+  if (!pdfDoc || flipping) return;
+  renderPageTo(current, frontOff).then(() => drawFlat(frontOff));
+});
+
+init().catch(err => {
+  loader.innerHTML = `<p style="color:var(--gold);font-family:monospace;font-size:0.72rem;padding:24px;text-align:center;line-height:2">
+    Could not load PDF.<br><small style="opacity:.5">${err.message}</small></p>`;
+});
+</script>
+</body>
+</html>
