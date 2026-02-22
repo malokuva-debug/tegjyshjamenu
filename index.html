@@ -415,8 +415,10 @@ async function flip(dir) {
   // Render destination page into backOff
   await renderPageTo(next, backOff);
 
-  // Make sure display canvas is sized to frontOff (should already be)
+  // Size the canvas — this clears it, so immediately draw frame 0
+  // synchronously before the browser paints, eliminating the blank flicker
   sizeDisplayCanvas(frontOff);
+  drawTurn(frontOff, backOff, 0, dir);
 
   animateTurn(dir, () => {
     // Swap refs
